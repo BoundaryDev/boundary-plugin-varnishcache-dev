@@ -27,8 +27,7 @@ class VarnishCachePlugin(object):
         self.settings = boundary_plugin.parse_params()
         self.accumulator = boundary_accumulator
 
-    def get_stats(self):
-        instance_name = self.settings.get("instance_name", "")
+    def get_stats(self, instance_name):
         cmd = "varnishstat -1 -j"
         if instance_name:
             # WARNING: There is a shell injection vulnerability here, where anyone with access to modify the
@@ -39,6 +38,9 @@ class VarnishCachePlugin(object):
         p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
         out, err = p.communicate()
         del p
+        # Ignore invalid instance names (which return no data) silently
+        if not out:
+            return {}
         data = json.loads(out)
         return data
 
@@ -92,7 +94,7 @@ class VarnishCachePlugin(object):
             ('s_sess', 'VARNISH_CACHE_S_SESS', True),
         )
 
-    def handle_metrics(self, data):
+    def handle_metrics(self, data, instance_name):
         for metric_item in self.get_metric_list():
             metric_name, boundary_name, accumulate = metric_item[:3]
             metric_data = data.get(metric_name, {}).get('value', None)
@@ -104,7 +106,8 @@ class VarnishCachePlugin(object):
                 value = self.accumulator.accumulate(metric_name, metric_data)
             else:
                 value = metric_data
-            boundary_plugin.boundary_report_metric(self.boundary_metric_prefix + boundary_name, value)
+            boundary_plugin.boundary_report_metric(self.boundary_metric_prefix + boundary_name,
+                                                   value, source=instance_name)
 
     def main(self):
         logging.basicConfig(level=logging.ERROR, filename=self.settings.get('log_file', None))
@@ -113,9 +116,11 @@ class VarnishCachePlugin(object):
             boundary_plugin.log_metrics_to_file(reports_log)
         boundary_plugin.start_keepalive_subprocess()
 
+        instances = [i['instance_name'] for i in self.settings.get("items", [{'instance_name': None}])]
         while True:
-            data = self.get_stats_with_retries()
-            self.handle_metrics(data)
+            for instance_name in instances:
+                data = self.get_stats_with_retries(instance_name)
+                self.handle_metrics(data, instance_name)
             boundary_plugin.sleep_interval()
 
 
